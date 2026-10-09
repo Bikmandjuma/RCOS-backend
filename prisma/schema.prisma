@@ -1,0 +1,592 @@
+// RestaurantOS — Phase 1 schema.
+// Kept provider-portable: no enums / Json / native types, so switching
+// `provider` to "mysql" (the PDF's target stack) is a one-line change.
+// Every tenant-owned table carries tenantId and is always queried with it.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Plan {
+  id        String  @id @default(cuid())
+  code      String  @unique // monthly | quarterly | semiannual | yearly
+  name      String
+  months    Int
+  priceRwf  Int
+  sortOrder Int     @default(0)
+  active    Boolean @default(true)
+}
+
+model Tenant {
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  businessType String   @default("COFFEE_SHOP")
+  description  String?
+  phone        String
+  email        String?
+  address      String?
+  city         String?
+  country      String   @default("RW")
+  currency     String   @default("RWF")
+  timezone     String   @default("Africa/Kigali")
+  logoPath     String?
+  brandColor   String   @default("#155A41")
+  status       String   @default("ACTIVE")
+  // Phase 2: how guests pay the restaurant (shown at checkout) and whether proof is mandatory
+  paymentInstructions String?
+  requirePaymentProof Boolean @default(true)
+  // Phase 5
+  loyaltyEnabled      Boolean @default(false)
+  loyaltyRwfPerPoint  Int     @default(100)
+  rewardPoints        Int     @default(500)
+  rewardName          String?
+  acceptReservations  Boolean @default(false)
+  maxPartySize        Int     @default(10)
+  // Platform controls
+  suspendedReason     String?
+  // Custom domain: "claimed" is what the owner typed; "verified" is set only after proving control, and is unique.
+  customDomain        String?
+  domainToken         String?
+  verifiedDomain      String? @unique
+  suspendedAt         DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  categories   MenuCategory[]
+  products     Product[]
+  tables       DiningTable[]
+  orders       Order[]
+  ingredients  Ingredient[]
+  customers    Customer[]
+  promotions   Promotion[]
+  suppliers    Supplier[]
+  branches     Branch[]
+  roles        Role[]
+  users        User[]
+  invitations  StaffInvitation[]
+  subscription Subscription?
+  payments     BillingPayment[]
+  auditLogs    AuditLog[]
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  address   String?
+  phone     String?
+  opensAt   String   @default("07:00")
+  closesAt  String   @default("21:00")
+  isMain    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  isSystem    Boolean  @default(false)
+  isOwner     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permissions RolePermission[]
+  users       User[]
+  invitations StaffInvitation[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model RolePermission {
+  roleId     String
+  permission String
+
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permission])
+}
+
+model User {
+  id           String    @id @default(cuid())
+  tenantId     String
+  roleId       String
+  email        String    @unique
+  passwordHash String
+  fullName     String
+  phone        String?
+  isActive     Boolean   @default(true)
+  tokenVersion Int       @default(0)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id])
+
+  @@index([tenantId])
+}
+
+model StaffInvitation {
+  id          String    @id @default(cuid())
+  tenantId    String
+  roleId      String
+  email       String
+  fullName    String?
+  tokenHash   String    @unique
+  invitedById String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id])
+
+  @@index([tenantId])
+}
+
+model Subscription {
+  id               String    @id @default(cuid())
+  tenantId         String    @unique
+  planCode         String
+  trialEndsAt      DateTime
+  trialGranted     Boolean   @default(true)
+  currentPeriodEnd DateTime?
+  canceledAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+model BillingPayment {
+  id            String    @id @default(cuid())
+  tenantId      String
+  planCode      String
+  amountRwf     Int
+  currency      String    @default("RWF")
+  txRef         String    @unique
+  providerTxId  String?
+  status        String    @default("PENDING") // PENDING | SUCCESSFUL | FAILED
+  method        String?
+  failureReason String?
+  periodStart   DateTime?
+  periodEnd     DateTime?
+  initiatedById String
+  createdAt     DateTime  @default(now())
+  paidAt        DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+}
+
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  eventKey    String    @unique
+  payload     String
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+// One free trial per person / phone number: claims are keyed by normalized email and phone.
+model TrialClaim {
+  key       String   @id
+  tenantId  String
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  tenantId   String
+  actorId    String?
+  actorName  String?
+  action     String
+  entityType String?
+  entityId   String?
+  summary    String
+  meta       String?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+}
+
+// ---------------- Phase 2: menu, tables, orders ----------------
+
+model MenuCategory {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  products Product[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  tenantId    String
+  categoryId  String
+  name        String
+  description String?
+  priceRwf    Int
+  isAvailable Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  category MenuCategory @relation(fields: [categoryId], references: [id])
+  recipe   RecipeItem[]
+
+  @@index([tenantId])
+  @@index([categoryId])
+}
+
+// Each table has a permanent public token. The QR code encodes /q/<token>; the token resolves to
+// tenant + branch + table on the server, so printed stickers never need replacing (PDF §79-80).
+model DiningTable {
+  id        String   @id @default(cuid())
+  tenantId  String
+  branchId  String
+  label     String
+  qrToken   String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, label])
+  @@index([tenantId])
+}
+
+// Orders are business records: they are never deleted, only moved through statuses.
+model Order {
+  id                String    @id @default(cuid())
+  tenantId          String
+  branchId          String
+  tableId           String?
+  tableLabel        String?
+  number            Int
+  publicToken       String    @unique
+  status            String    @default("PLACED") // PLACED | PREPARING | READY | SERVED | COMPLETED | CANCELLED
+  paymentStatus     String    @default("PROOF_SUBMITTED") // NOT_REQUIRED | PROOF_SUBMITTED | CONFIRMED | REJECTED
+  paymentNote       String?
+  proofPath         String?
+  proofRequired     Boolean   @default(true)
+  paymentReviewedBy String?
+  paymentReviewedAt DateTime?
+  paymentMethod     String?   // MOBILE_MONEY | CASH | CARD | OTHER (set when payment is confirmed or recorded)
+  paidAt            DateTime?
+  refundedRwf       Int       @default(0)
+  stockDeducted     Boolean   @default(false)
+  customerId        String?
+  subtotalRwf       Int       @default(0)
+  discountRwf       Int       @default(0)
+  promotionName     String?
+  loyaltyAwarded    Int       @default(0)
+  customerName      String
+  customerPhone     String?
+  note              String?
+  totalRwf          Int
+  currency          String    @default("RWF")
+  cancelReason      String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  tenant  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  items   OrderItem[]
+  history OrderStatusEvent[]
+  refunds Refund[]
+
+  @@unique([tenantId, number])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, status])
+}
+
+model OrderItem {
+  id           String  @id @default(cuid())
+  orderId      String
+  productId    String?
+  name         String  // snapshot: later menu edits never rewrite past orders
+  unitPriceRwf Int
+  quantity     Int
+  note         String?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
+
+model OrderStatusEvent {
+  id         String   @id @default(cuid())
+  orderId    String
+  fromStatus String?
+  toStatus   String
+  actorId    String?
+  actorName  String?
+  createdAt  DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
+
+// Refunds are recorded here; the money itself is returned outside the app (cash / Mobile Money).
+model Refund {
+  id         String   @id @default(cuid())
+  tenantId   String
+  orderId    String
+  amountRwf  Int
+  reason     String
+  method     String   // how the guest was repaid: MOBILE_MONEY | CASH | CARD | OTHER
+  actorId    String?
+  actorName  String?
+  createdAt  DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([orderId])
+}
+
+// ---------------- Phase 4: inventory ----------------
+// Quantities are whole numbers in the ingredient's base unit: grams (G), millilitres (ML) or pieces (PCS).
+// The UI shows kg / L where that reads better.
+
+model Ingredient {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  unit        String   // G | ML | PCS  (fixed once created)
+  quantity    Int      @default(0)
+  lowStockAt  Int      @default(0)
+  unitCostRwf Float    @default(0) // RWF per base unit (e.g. 25 per gram); updated from the latest purchase
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  movements   StockMovement[]
+  recipeItems RecipeItem[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model RecipeItem {
+  id           String @id @default(cuid())
+  tenantId     String
+  productId    String
+  ingredientId String
+  quantity     Int
+
+  product    Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id])
+
+  @@unique([productId, ingredientId])
+  @@index([tenantId])
+}
+
+// Stock is never edited in place: every change is a movement (PURCHASE, SALE, WASTE, ADJUSTMENT).
+model StockMovement {
+  id           String   @id @default(cuid())
+  tenantId     String
+  ingredientId String
+  type         String
+  quantity     Int      // signed change in base units
+  balanceAfter Int
+  reason       String?
+  orderId      String?
+  purchaseId   String?
+  actorId      String?
+  actorName    String?
+  createdAt    DateTime @default(now())
+
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([ingredientId, createdAt])
+}
+
+model Supplier {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  phone     String?
+  notes     String?
+  createdAt DateTime @default(now())
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  purchases Purchase[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Purchase {
+  id           String   @id @default(cuid())
+  tenantId     String
+  supplierId   String?
+  supplierName String?
+  totalRwf     Int
+  note         String?
+  actorId      String?
+  actorName    String?
+  createdAt    DateTime @default(now())
+
+  supplier Supplier?       @relation(fields: [supplierId], references: [id])
+  items    PurchaseItem[]
+
+  @@index([tenantId, createdAt])
+}
+
+model PurchaseItem {
+  id             String @id @default(cuid())
+  purchaseId     String
+  ingredientId   String
+  ingredientName String
+  quantity       Int
+  totalCostRwf   Int
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseId])
+}
+
+// ---------------- Phase 5: customers, loyalty, promotions, reservations, reviews ----------------
+
+model Customer {
+  id            String   @id @default(cuid())
+  tenantId      String
+  name          String
+  phone         String?
+  phoneKey      String?  // normalised (last 9 digits) so "0788 123 456" and "+250788123456" are one person
+  email         String?
+  notes         String?
+  loyaltyPoints Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant   Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  loyalty  LoyaltyTransaction[]
+
+  @@unique([tenantId, phoneKey])
+  @@index([tenantId])
+}
+
+model LoyaltyTransaction {
+  id           String   @id @default(cuid())
+  tenantId     String
+  customerId   String
+  orderId      String?
+  type         String   // EARN | REDEEM | ADJUST | REVERSE
+  points       Int      // signed
+  balanceAfter Int
+  note         String?
+  actorName    String?
+  createdAt    DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt])
+}
+
+// A percentage off, applied automatically by the server when an order is placed.
+model Promotion {
+  id         String   @id @default(cuid())
+  tenantId   String
+  name       String
+  percent    Int
+  categoryId String?  // null = whole menu
+  days       String?  // "1,2,3,4,5" (0 = Sunday); null = every day
+  startTime  String?  // "15:00"
+  endTime    String?  // "18:00"
+  startDate  String?  // "2026-10-01"
+  endDate    String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+model Reservation {
+  id            String   @id @default(cuid())
+  tenantId      String
+  publicToken   String   @unique
+  customerName  String
+  customerPhone String
+  customerId    String?
+  partySize     Int
+  date          String   // YYYY-MM-DD in the business's timezone
+  time          String   // HH:MM
+  note          String?
+  status        String   @default("PENDING") // PENDING | CONFIRMED | REJECTED | ARRIVED | SEATED | COMPLETED | CANCELLED | NO_SHOW
+  statusNote    String?
+  tableLabel    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([tenantId, date])
+}
+
+model Review {
+  id         String   @id @default(cuid())
+  tenantId   String
+  orderId    String   @unique
+  rating     Int
+  comment    String?
+  authorName String
+  hidden     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+// ---------------- Platform administration (the operator of RestaurantOS, not a restaurant) ----------------
+
+model PlatformUser {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  fullName     String
+  role         String    @default("SUPER_ADMIN") // SUPER_ADMIN (can change things) | SUPPORT (read-only)
+  isActive     Boolean   @default(true)
+  tokenVersion Int       @default(0)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+}
+
+model PlatformEvent {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actorName String?
+  action    String
+  summary   String
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
